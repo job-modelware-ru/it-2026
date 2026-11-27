@@ -55,21 +55,23 @@ WHERE owner.phone = '70000000001'
 ORDER BY e.id;
 
 -- 8. Взять учебную заявку в работу вместе с историей и уведомлением.
--- Блокировка строки позволяет сервису проверить допустимость перехода.
+-- В приложении ID заявки приходит из маршрута, а ID диспетчера — из сессии.
 BEGIN;
 SELECT id, status FROM tickets
-WHERE author_id = (SELECT id FROM accounts WHERE phone = '70000000001')
+WHERE id = 1
 FOR UPDATE;
 
-WITH changed AS (
-    UPDATE tickets SET status = 'in_progress'
-    WHERE author_id = (SELECT id FROM accounts WHERE phone = '70000000001')
-      AND status = 'new'
-    RETURNING id, author_id
+WITH dispatcher AS (
+    SELECT id FROM accounts
+    WHERE phone = '70000000004' AND role = 'dispatcher'
+), changed AS (
+    UPDATE tickets t SET status = 'in_progress'
+    FROM dispatcher d
+    WHERE t.id = 1 AND t.status = 'new'
+    RETURNING t.id, t.author_id, d.id AS dispatcher_id
 ), event AS (
     INSERT INTO ticket_events (ticket_id, actor_id, status)
-    SELECT c.id, a.id, 'in_progress'
-    FROM changed c CROSS JOIN accounts a WHERE a.role = 'dispatcher'
+    SELECT id, dispatcher_id, 'in_progress' FROM changed
     RETURNING id, ticket_id
 )
 INSERT INTO notifications (recipient_id, ticket_event_id, body, delivery_status, next_attempt_at)
@@ -97,9 +99,12 @@ RETURNING n.id, n.recipient_id, n.body, n.lease_until;
 ROLLBACK; -- При работе сервиса резерв фиксируется до обращения к MAX.
 
 -- 10. Возврат заданий, обработчик которых остановился.
+-- Для примера задан предел в три попытки, включая истёкшие резервы.
 BEGIN;
 UPDATE notifications
-SET delivery_status = 'pending', lease_until = NULL, next_attempt_at = now()
+SET delivery_status = CASE WHEN attempt_count < 3 THEN 'pending' ELSE 'failed' END,
+    lease_until = NULL,
+    next_attempt_at = CASE WHEN attempt_count < 3 THEN now() END
 WHERE delivery_status = 'processing' AND lease_until <= now()
-RETURNING id;
+RETURNING id, delivery_status;
 ROLLBACK;
